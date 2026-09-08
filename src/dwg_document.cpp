@@ -488,6 +488,8 @@ Shape transformShape(const Shape &s, const Transform2D &t) {
     out.textHeightDoc = s.textHeightDoc * scale;
     out.textAngleRad = s.textAngleRad + rotation;
     for (double &d : out.dashPattern) d *= scale;
+    for (double &w : out.startWidths) w *= scale;
+    for (double &w : out.endWidths) w *= scale;
     if (mirrored) {
         // A mirrored insert (negative xscale/yscale) flips which way each
         // bulge segment curves.
@@ -542,6 +544,34 @@ namespace {
 bool hasAnyBulge(const std::vector<double> &bulges) {
     return std::any_of(bulges.begin(), bulges.end(),
                         [](double b) { return b != 0.0; });
+}
+
+bool hasAnyWidth(const std::vector<double> &startWidths, const std::vector<double> &endWidths) {
+    return std::any_of(startWidths.begin(), startWidths.end(), [](double w) { return w != 0.0; }) ||
+           std::any_of(endWidths.begin(), endWidths.end(), [](double w) { return w != 0.0; });
+}
+
+// Resolves one vertex's effective start/end width (DXF codes 40/41) against
+// the entity-level default ("constant width" DXF code 43 for LWPOLYLINE,
+// default start/end width for POLYLINE): a vertex that specifies neither
+// falls back to the entity default for both; a vertex with a nonzero start
+// width but no end width tapers to a *constant* width across the segment
+// (end defaults to start), matching how AutoCAD treats an omitted code 41.
+// libdxfrw has no "was this code present" flag, so a genuinely-zero width
+// vertex is indistinguishable from an omitted one -- same inherent ambiguity
+// every DXF-consuming renderer has.
+void resolveVertexWidth(double vertexStart, double vertexEnd, double defaultStart, double defaultEnd,
+                         double &outStart, double &outEnd) {
+    if (vertexStart == 0.0 && vertexEnd == 0.0) {
+        outStart = defaultStart;
+        outEnd = defaultEnd;
+    } else if (vertexEnd == 0.0) {
+        outStart = vertexStart;
+        outEnd = vertexStart;
+    } else {
+        outStart = vertexStart;
+        outEnd = vertexEnd;
+    }
 }
 
 // Builds one HatchLoop from a DRW_HatchLoop. Returns false for a loop this
@@ -876,8 +906,10 @@ DwgDocument::DimStyleDefaults DwgDocument::uniformFallbackDimStyle(double refere
     return {arrow, arrow * 0.25, arrow * 0.7, arrow * 1.1};
 }
 
-DwgDocument::DimStyleDefaults DwgDocument::resolveDimStyle(const DRW_Dimension &dim, double referenceLength) {
-    auto it = dimStyles_.find(dim.getStyle());
+DwgDocument::DimStyleDefaults DwgDocument::resolveDimStyle(const std::string &styleName,
+                                                             const std::vector<std::shared_ptr<DRW_Variant>> &extData,
+                                                             double referenceLength) {
+    auto it = dimStyles_.find(styleName);
     if (it == dimStyles_.end()) it = dimStyles_.find("Standard");
 
     DimStyleDefaults style;
@@ -917,11 +949,11 @@ DwgDocument::DimStyleDefaults DwgDocument::resolveDimStyle(const DRW_Dimension &
     // the corresponding raw component before $DIMSCALE is applied --
     // AutoCAD's own precedence (most specific to this one dimension wins).
     double effectiveScale = dimScale_;
-    findDstyleXdataOverride(dim.extData, 40, effectiveScale);
-    findDstyleXdataOverride(dim.extData, 41, style.arrowSize);
-    findDstyleXdataOverride(dim.extData, 42, style.extOffset);
-    findDstyleXdataOverride(dim.extData, 44, style.extExtend);
-    findDstyleXdataOverride(dim.extData, 140, style.textHeight);
+    findDstyleXdataOverride(extData, 40, effectiveScale);
+    findDstyleXdataOverride(extData, 41, style.arrowSize);
+    findDstyleXdataOverride(extData, 42, style.extOffset);
+    findDstyleXdataOverride(extData, 44, style.extExtend);
+    findDstyleXdataOverride(extData, 140, style.textHeight);
 
     // $DIMSCALE (or this entity's own XDATA override of it) applies on top
     // of whichever style is in effect -- see the declaration comment for
@@ -1021,7 +1053,7 @@ void DwgDocument::addLinearStyleDimension(const DRW_Dimension &dim, Point2D p1, 
     const Point2D foot1{dimLinePt.x + s1 * dirX, dimLinePt.y + s1 * dirY};
     const Point2D foot2{dimLinePt.x + s2 * dirX, dimLinePt.y + s2 * dirY};
     const double measure = std::abs(s2 - s1);
-    const DimStyleDefaults style = resolveDimStyle(dim, measure);
+    const DimStyleDefaults style = resolveDimStyle(dim.getStyle(), dim.extData, measure);
     const RgbColor color = resolveEntityColor(dim);
 
     // Each extension line's own perpendicular offset from the dimension
@@ -1074,7 +1106,7 @@ void DwgDocument::addAngularStyleDimension(const DRW_Dimension &dim, Point2D ver
     const double radius = std::hypot(radiusThroughPoint.x - vertex.x, radiusThroughPoint.y - vertex.y);
     if (radius < 1e-9) return; // degenerate -- arc-location point sits on the vertex itself
 
-    const DimStyleDefaults style = resolveDimStyle(dim, radius);
+    const DimStyleDefaults style = resolveDimStyle(dim.getStyle(), dim.extData, radius);
     const double dir1 = std::atan2(edgePoint1.y - vertex.y, edgePoint1.x - vertex.x);
     const double dir2 = std::atan2(edgePoint2.y - vertex.y, edgePoint2.x - vertex.x);
     const double throughAngle = std::atan2(radiusThroughPoint.y - vertex.y, radiusThroughPoint.x - vertex.x);
@@ -1140,7 +1172,7 @@ void DwgDocument::addDimRadial(const DRW_DimRadial *data) {
     const Point2D textAnchor{data->getTextPoint().x, data->getTextPoint().y};
     const double measure = std::hypot(onCircle.x - center.x, onCircle.y - center.y);
     const RgbColor color = resolveEntityColor(*data);
-    const DimStyleDefaults style = resolveDimStyle(*data, measure);
+    const DimStyleDefaults style = resolveDimStyle(data->getStyle(), data->extData, measure);
 
     addDimensionLine(onCircle, textAnchor, color);
     double dirAngle = std::atan2(textAnchor.y - onCircle.y, textAnchor.x - onCircle.x);
@@ -1156,7 +1188,7 @@ void DwgDocument::addDimDiametric(const DRW_DimDiametric *data) {
     const Point2D textAnchor{data->getTextPoint().x, data->getTextPoint().y};
     const double measure = std::hypot(p2.x - p1.x, p2.y - p1.y);
     const RgbColor color = resolveEntityColor(*data);
-    const DimStyleDefaults style = resolveDimStyle(*data, measure);
+    const DimStyleDefaults style = resolveDimStyle(data->getStyle(), data->extData, measure);
 
     addDimensionLine(p1, textAnchor, color);
     double dirAngle = std::atan2(textAnchor.y - p1.y, textAnchor.x - p1.x);
@@ -1190,17 +1222,66 @@ void DwgDocument::addDimAngular3P(const DRW_DimAngular3p *data) {
     addAngularStyleDimension(*data, vertex, p1, p2, throughPt);
 }
 
+// A LEADER's annotation (the MTEXT/TEXT/TOLERANCE/INSERT block it points
+// at) is a separate entity in the file, only soft-linked via `annotHandle`
+// -- this viewer doesn't resolve that handle, but doesn't need to: that
+// annotation entity gets its own addMText/addText/etc callback independently
+// and renders wherever it's positioned, same as if it had no leader at all.
+// So this only needs the leader's own geometry: the line/spline-approximated
+// polyline through its vertices, plus an arrowhead at the first vertex
+// (nearest the annotated feature) when enabled.
+void DwgDocument::addLeader(const DRW_Leader *data) {
+    if (!data || data->vertexlist.size() < 2) return;
+
+    Shape s;
+    s.kind = ShapeKind::Polyline;
+    s.points.reserve(data->vertexlist.size());
+    double totalLength = 0.0;
+    for (size_t i = 0; i < data->vertexlist.size(); ++i) {
+        const auto &v = data->vertexlist[i];
+        s.points.push_back({v->x, v->y});
+        if (i > 0) {
+            const auto &prev = data->vertexlist[i - 1];
+            totalLength += std::hypot(v->x - prev->x, v->y - prev->y);
+        }
+    }
+    // leadertype==1 (spline) has no curve-fit data in DRW_Leader beyond
+    // these same vertices (no knots/weights) -- rendered as straight
+    // segments through them, the same "no curve data available" gap noted
+    // for SPLINE elsewhere in this project (see CLAUDE.md).
+    const RgbColor color = resolveEntityColor(*data);
+    s.color = color;
+    s.dashPattern = resolveEntityLineType(*data);
+    addShape(std::move(s));
+
+    if (data->arrow == 0) return; // arrowhead disabled, code 71
+
+    const Point2D tip{data->vertexlist.front()->x, data->vertexlist.front()->y};
+    const Point2D next{data->vertexlist[1]->x, data->vertexlist[1]->y};
+    if (std::hypot(next.x - tip.x, next.y - tip.y) < 1e-9) return; // degenerate first segment
+    const double dirAngle = std::atan2(next.y - tip.y, next.x - tip.x);
+    const DimStyleDefaults style = resolveDimStyle(data->style, data->extData, totalLength);
+    addDimensionArrow(tip, dirAngle, style.arrowSize, color);
+}
+
 void DwgDocument::addLWPolyline(const DRW_LWPolyline &data) {
     Shape s;
     s.kind = ShapeKind::Polyline;
     s.closed = (data.flags & 1) != 0;
     s.points.reserve(data.vertlist.size());
     s.bulges.reserve(data.vertlist.size());
+    s.startWidths.reserve(data.vertlist.size());
+    s.endWidths.reserve(data.vertlist.size());
     for (const auto &v : data.vertlist) {
         s.points.push_back({v->x, v->y});
         s.bulges.push_back(v->bulge);
+        double sw, ew;
+        resolveVertexWidth(v->stawidth, v->endwidth, data.width, data.width, sw, ew);
+        s.startWidths.push_back(sw);
+        s.endWidths.push_back(ew);
     }
     if (!hasAnyBulge(s.bulges)) s.bulges.clear();
+    if (!hasAnyWidth(s.startWidths, s.endWidths)) { s.startWidths.clear(); s.endWidths.clear(); }
     s.color = resolveEntityColor(data);
     s.dashPattern = resolveEntityLineType(data);
     if (!s.points.empty()) addShape(std::move(s));
@@ -1212,11 +1293,18 @@ void DwgDocument::addPolyline(const DRW_Polyline &data) {
     s.closed = (data.flags & 1) != 0;
     s.points.reserve(data.vertlist.size());
     s.bulges.reserve(data.vertlist.size());
+    s.startWidths.reserve(data.vertlist.size());
+    s.endWidths.reserve(data.vertlist.size());
     for (const auto &v : data.vertlist) {
         s.points.push_back({v->basePoint.x, v->basePoint.y});
         s.bulges.push_back(v->bulge);
+        double sw, ew;
+        resolveVertexWidth(v->stawidth, v->endwidth, data.defstawidth, data.defendwidth, sw, ew);
+        s.startWidths.push_back(sw);
+        s.endWidths.push_back(ew);
     }
     if (!hasAnyBulge(s.bulges)) s.bulges.clear();
+    if (!hasAnyWidth(s.startWidths, s.endWidths)) { s.startWidths.clear(); s.endWidths.clear(); }
     s.color = resolveEntityColor(data);
     s.dashPattern = resolveEntityLineType(data);
     if (!s.points.empty()) addShape(std::move(s));

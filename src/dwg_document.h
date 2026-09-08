@@ -13,6 +13,7 @@
 // callbacks that carry geometry, and we can drop the entities straight
 // into simple structs ready for QPainter.
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -95,6 +96,23 @@ struct Shape {
     // leaves this empty. See ViewerWidget::paintEvent's bulgeToArc() for the
     // conversion to a drawable arc.
     std::vector<double> bulges;
+
+    // Polyline only. Empty means every segment is the viewer's default
+    // cosmetic (always-0-width) stroke, same as a Shape with no width data
+    // at all -- this is the overwhelming majority of polylines, so an empty
+    // vector is the fast/common path, not a special case. When non-empty,
+    // sized 1-per-point exactly like bulges: startWidths[i]/endWidths[i] is
+    // the width (DXF codes 40/41, already resolved against the entity's
+    // constant-width/default-width fallback -- see DwgDocument::addLWPolyline
+    // /addPolyline) at the start/end of the segment points[i] -> points[i+1]
+    // (or points[N-1] -> points[0] when `closed`). A segment whose own
+    // startWidths[i]/endWidths[i] are both 0 still draws as a plain cosmetic
+    // stroke -- only segments with nonzero width draw as a filled band -- so
+    // a polyline can mix thin and wide segments (e.g. a thin shaft with one
+    // wide tapered arrowhead segment), matching how AutoCAD treats width
+    // per-segment rather than per-entity.
+    std::vector<double> startWidths;
+    std::vector<double> endWidths;
 
     // Line/Circle/Arc/Polyline only (never set for Text -- DXF/AutoCAD
     // always render text glyphs solid regardless of the entity's nominal
@@ -227,6 +245,7 @@ public:
     void addDimAngular(const DRW_DimAngular *data) override;
     void addDimAngular3P(const DRW_DimAngular3p *data) override;
     void addDimStyle(const DRW_Dimstyle &data) override;
+    void addLeader(const DRW_Leader *data) override;
 
     // --- Everything else in DRW_Interface is a no-op for a pure viewer.
     // Header/table/style callbacks are read but not used; the write*()
@@ -252,7 +271,6 @@ public:
     // rather than approximated with the wrong shape.
     void addDimOrdinate(const DRW_DimOrdinate *) override {}
     void addDimArc(const DRW_DimArc *) override {}
-    void addLeader(const DRW_Leader *) override {}
     void addViewport(const DRW_Viewport &) override {}
     void addImage(const DRW_Image *) override {}
     void linkImage(const DRW_ImageDef *) override {}
@@ -337,6 +355,13 @@ private:
         double textHeight;
     };
 
+    // Takes the style name and XDATA directly (rather than a `const
+    // DRW_Dimension &`) so LEADER entities -- which resolve their arrowhead
+    // through the exact same DIMSTYLE machinery as a DIMENSION's arrows, but
+    // aren't a DRW_Dimension subclass -- can share this same resolution
+    // instead of duplicating it. Callers pass dim.getStyle()/dim.extData or
+    // leader->style/leader->extData.
+    //
     // Looks up `styleName` (a dimension entity's own getStyle()) in
     // dimStyles_ (populated by addDimStyle from the file's DIMSTYLE table)
     // or falls back to dimStyles_["Standard"], then to the header-derived
@@ -387,7 +412,9 @@ private:
     // the initial bug report called out by value (500, 150, 930, 1015),
     // each overriding DIMSCALE to 100 (not the header's 12) and DIMTXT to
     // 2.6.
-    DimStyleDefaults resolveDimStyle(const DRW_Dimension &dim, double referenceLength);
+    DimStyleDefaults resolveDimStyle(const std::string &styleName,
+                                      const std::vector<std::shared_ptr<DRW_Variant>> &extData,
+                                      double referenceLength);
 
     // One arrow size shared by every dimension in a file with no
     // trustworthy size data anywhere (see resolveDimStyle) -- cached on
