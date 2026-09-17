@@ -63,12 +63,12 @@ process needs this DLL built against Qt5 instead — mirroring
 
 ```bash
 # 64-bit (Qt6/msvc2022_64) -- for a 64-bit host process
-cmake -S dwgcore -B dwgcore/build -A x64 -DCMAKE_PREFIX_PATH=C:/Qt/6.11.2/msvc2022_64
-cmake --build dwgcore/build --config Release
+cmake -S . -B build -A x64 -DCMAKE_PREFIX_PATH=C:/Qt/6.10.3/msvc2022_64
+cmake --build build --config Release
 
 # 32-bit (Qt5/msvc2019) -- for a 32-bit (legacy) host process
-cmake -S dwgcore -B dwgcore/build-x86 -A Win32 -DCMAKE_PREFIX_PATH=C:/Qt/5.15.2/msvc2019
-cmake --build dwgcore/build-x86 --config Release
+cmake -S . -B build-x86 -A Win32 -DCMAKE_PREFIX_PATH=C:/Qt/5.15.2/msvc2019
+cmake --build build-x86 --config Release
 ```
 
 Each produces `dwgcore.dll` (plus `dwgcore.lib`) alongside the matching
