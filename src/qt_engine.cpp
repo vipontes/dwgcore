@@ -1,6 +1,7 @@
 #include "qt_engine.h"
 
 #include <QApplication>
+#include <QEvent>
 #include <QMetaObject>
 #include <QObject>
 
@@ -100,13 +101,24 @@ void shutdown() {
     std::lock_guard<std::mutex> lifecycleLock(g_lifecycleMutex);
     if (!g_started) return;
 
-    QObject *dispatcher;
+    // Keep g_readyMutex held while we post the quit call so the dispatcher
+    // object cannot be destroyed underneath us by the Qt thread returning
+    // from app.exec() and clearing g_dispatcher. This closes the TOCTOU
+    // window that previously allowed invokeMethod to be called on a
+    // partially-destroyed QObject (or to silently fail to post the quit
+    // event), leaving the worker thread alive forever.
     {
         std::lock_guard<std::mutex> lock(g_readyMutex);
-        dispatcher = g_dispatcher;
-    }
-    if (dispatcher) {
-        QMetaObject::invokeMethod(dispatcher, [] { qApp->quit(); }, Qt::QueuedConnection);
+        if (g_dispatcher) {
+            const bool posted = QMetaObject::invokeMethod(g_dispatcher, [] { qApp->quit(); }, Qt::QueuedConnection);
+            if (!posted) {
+                // The dispatcher was alive but the event could not be queued
+                // (event loop not pumping, etc.). Post a QEvent::Quit directly
+                // to the QApplication as a last-resort signal.
+                QCoreApplication *app = QCoreApplication::instance();
+                if (app) QCoreApplication::postEvent(app, new QEvent(QEvent::Quit));
+            }
+        }
     }
     if (g_thread.joinable()) g_thread.join();
     g_started = false;
