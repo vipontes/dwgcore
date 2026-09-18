@@ -38,6 +38,8 @@ endif()
 add_library(dwgcore SHARED
     src/dwg_document.cpp
     src/dwg_document.h
+    src/lff_font.cpp
+    src/lff_font.h
     src/viewer_widget.cpp
     src/viewer_widget.h
     src/qt_engine.cpp
@@ -50,3 +52,18 @@ add_library(dwgcore SHARED
 target_include_directories(dwgcore PRIVATE src)
 target_compile_definitions(dwgcore PRIVATE DWGCORE_EXPORTS)
 target_link_libraries(dwgcore PRIVATE ${QT_WIDGETS_TARGET} dxfrw)
+
+# ViewerWidget looks up TEXT/MTEXT stroke fonts (resources/fonts/*.lff) next
+# to the built executable at runtime (see lffFontsDir() in viewer_widget.cpp)
+# rather than bundling them as Qt resources, so they can be added/replaced
+# without a rebuild. Copy the whole resources/ tree alongside the exe on
+# every build so a fresh `cmake .. && make` (see README/CLAUDE.md's Build &
+# run section) has them without a manual copy step.
+if(EXISTS "${CMAKE_SOURCE_DIR}/resources")
+    add_custom_command(TARGET dwgcore POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_SOURCE_DIR}/resources"
+                "$<TARGET_FILE_DIR:dwgcore>/resources"
+        COMMENT "Copying resources/ (fonts, hatch patterns) next to dwgcore"
+    )
+endif()
